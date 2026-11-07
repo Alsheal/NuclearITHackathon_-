@@ -1,66 +1,104 @@
+
 import numpy as np
 
 from rdkit import Chem, DataStructs
-from rdkit.Chem import (
-    rdFingerprintGenerator,
-    Descriptors,
-    Lipinski,
-    Crippen,
-    rdMolDescriptors
-)
-
-FP_SIZE = 2048
-FP_RADIUS = 2
-
-generator = rdFingerprintGenerator.GetMorganGenerator(
-    radius=FP_RADIUS,
-    fpSize=FP_SIZE
-)
+from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 
 
-def smiles_to_features(smiles_list):
+FINGERPRINT_BITS = 2048
+MORGAN_RADIUS = 2
 
-    features = []
 
-    for smiles in smiles_list:
+def is_valid_smiles(smiles):
+    """Проверяет корректность SMILES."""
 
-        mol = Chem.MolFromSmiles(str(smiles))
+    if not isinstance(smiles, str) or not smiles.strip():
+        return False
 
-        if mol is None:
-            raise ValueError(f"Invalid SMILES: {smiles}")
+    try:
+        return Chem.MolFromSmiles(smiles) is not None
+    except Exception:
+        return False
 
-        # Morgan Fingerprint
-        fp = generator.GetFingerprint(mol)
 
-        fp_array = np.zeros(
-            FP_SIZE,
+def smiles_to_features(smiles, cc50_values=None):
+    """Преобразует SMILES в числовые признаки."""
+
+    smiles = list(smiles)
+
+    if cc50_values is None:
+        cc50_values = [np.nan] * len(smiles)
+    else:
+        cc50_values = list(cc50_values)
+
+    if len(smiles) != len(cc50_values):
+        raise ValueError("Количество SMILES и CC50 не совпадает.")
+
+    result = []
+
+    for i, (smile, cc50) in enumerate(zip(smiles, cc50_values)):
+
+        if not is_valid_smiles(smile):
+            raise ValueError(
+                f"Некорректный SMILES в строке {i}: {smile}"
+            )
+
+        mol = Chem.MolFromSmiles(smile)
+
+        # Morgan fingerprints — описание структуры молекулы
+        fingerprint = AllChem.GetMorganFingerprintAsBitVect(
+            mol,
+            MORGAN_RADIUS,
+            nBits=FINGERPRINT_BITS
+        )
+
+        fingerprint_array = np.zeros(
+            FINGERPRINT_BITS,
             dtype=np.float32
         )
 
         DataStructs.ConvertToNumpyArray(
-            fp,
-            fp_array
+            fingerprint,
+            fingerprint_array
         )
 
-        # Молекулярные характеристики
-        descriptors = np.array([
+        # Физико-химические характеристики
+        descriptors = [
             Descriptors.MolWt(mol),
-            Crippen.MolLogP(mol),
+            Descriptors.MolLogP(mol),
             rdMolDescriptors.CalcTPSA(mol),
-            Lipinski.NumHDonors(mol),
-            Lipinski.NumHAcceptors(mol),
-            Lipinski.NumRotatableBonds(mol),
-            Lipinski.RingCount(mol),
-            Lipinski.HeavyAtomCount(mol),
+            rdMolDescriptors.CalcNumHBD(mol),
+            rdMolDescriptors.CalcNumHBA(mol),
+            rdMolDescriptors.CalcNumRings(mol),
+            rdMolDescriptors.CalcNumRotatableBonds(mol),
             rdMolDescriptors.CalcFractionCSP3(mol),
-            Lipinski.NumHeteroatoms(mol)
-        ], dtype=np.float32)
+            Descriptors.HeavyAtomCount(mol)
+        ]
 
-        molecule = np.concatenate([
-            fp_array,
-            descriptors
+        # Обработка CC50
+        try:
+            cc50 = float(cc50)
+        except (TypeError, ValueError):
+            cc50 = np.nan
+
+        missing_cc50 = (
+            not np.isfinite(cc50) or cc50 <= 0
+        )
+
+        if missing_cc50:
+            log_cc50 = np.nan
+        else:
+            log_cc50 = np.log10(cc50)
+
+        features = np.concatenate([
+            fingerprint_array,
+            np.array(descriptors, dtype=np.float32),
+            np.array(
+                [log_cc50, float(missing_cc50)],
+                dtype=np.float32
+            )
         ])
 
-        features.append(molecule)
+        result.append(features)
 
-    return np.array(features, dtype=np.float32)
+    return np.array(result, dtype=np.float32)

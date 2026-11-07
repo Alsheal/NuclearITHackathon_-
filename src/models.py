@@ -1,33 +1,23 @@
-from sklearn.ensemble import (
-    RandomForestRegressor,
-    ExtraTreesRegressor,
-    HistGradientBoostingRegressor
-)
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 
 
-def get_models():
+def build_model():
 
-    return {
+    model = RandomForestRegressor(
+        n_estimators=500,
+        max_features=0.7,
+        min_samples_split=4,
+        min_samples_leaf=2,
+        random_state=42,
+        n_jobs=-1
+    )
 
-        "RandomForest": RandomForestRegressor(
-            n_estimators=300,
-            max_features=0.8,
-            random_state=42,
-            n_jobs=-1
-        ),
+    pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("random_forest", model)
+    ])
 
-        "ExtraTrees": ExtraTreesRegressor(
-            n_estimators=300,
-            max_features=0.8,
-            random_state=42,
-            n_jobs=-1
-        ),
-
-        "HistGradientBoosting": HistGradientBoostingRegressor(
-            max_iter=200,
-            learning_rate=0.05,
-            max_leaf_nodes=15,
-            random_state=42
-        )
-
-    }
+    return pipeline
