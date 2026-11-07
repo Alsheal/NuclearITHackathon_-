@@ -1,40 +1,54 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from rdkit.Chem import Draw
 
-from src.demo_backend import DESCRIPTOR_NAMES
+from src import demo_backend as B
 
 
 def draw_mol(mol, size=(420, 320)):
     return Draw.MolToImage(mol, size=size)
 
 
-def parity_plot(test_df):
-    """Предсказано vs реальное (log10 SI). Нужен results/test_predictions.csv с SI_true, SI_predicted."""
-    y = np.log10(np.clip(test_df["SI_true"], 1e-2, None))
-    p = np.log10(np.clip(test_df["SI_predicted"], 1e-2, None))
-    lo, hi = min(y.min(), p.min()), max(y.max(), p.max())
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.scatter(y, p, alpha=0.6)
-    ax.plot([lo, hi], [lo, hi], "r--", label="идеал")
-    ax.set_xlabel("Реальное log10(SI)")
-    ax.set_ylabel("Предсказанное log10(SI)")
+def hist_si(values, title):
+    """Гистограмма log10(SI) с линией порога SI = 10 (нули и мелочь отсечены на 0.01)."""
+    v = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    fig, ax = plt.subplots(figsize=(5, 3.2))
+    ax.hist(np.log10(np.clip(v, 1e-2, None)), bins=25)
+    ax.axvline(np.log10(B.SI_THRESHOLD), ls="--", c="r", label=f"SI = {B.SI_THRESHOLD:g}")
+    ax.set(xlabel="log10(SI)", ylabel="Молекул", title=title)
     ax.legend()
     fig.tight_layout()
     return fig
 
 
-def descriptor_importance_plot(package):
-    """Важность дескрипторов (последние признаки вектора; биты отпечатка не интерпретируемы).
-    Работает для RandomForest/ExtraTrees; у HistGradientBoosting нет feature_importances_."""
-    model = package["model"]
-    n = len(DESCRIPTOR_NAMES)
-    if not hasattr(model, "feature_importances_") or len(model.feature_importances_) < n:
+def top_plot(df, n=15):
+    top = df.dropna(subset=["SI"]).nlargest(n, "SI").iloc[::-1]
+    fig, ax = plt.subplots(figsize=(6, 0.35 * len(top) + 1))
+    ax.barh([s[:28] + ("…" if len(s) > 28 else "") for s in top["smiles"]], top["SI"])
+    ax.axvline(B.SI_THRESHOLD, ls="--", c="r")
+    ax.set_xlabel("Прогноз SI")
+    fig.tight_layout()
+    return fig
+
+
+def importance_plot(model):
+    """Важность признаков: дескрипторы по отдельности, отпечаток Моргана одной суммой."""
+    imp = getattr(B.forest_of(model), "feature_importances_", None)
+    if imp is None:
         return None
-    imp = model.feature_importances_[-n:]
-    order = np.argsort(imp)
-    fig, ax = plt.subplots(figsize=(5, 3.5))
-    ax.barh([DESCRIPTOR_NAMES[i] for i in order], imp[order])
+    n_tail = len(imp) - B.FP_BITS
+    if n_tail == len(B.DESCRIPTOR_NAMES) + 2:
+        tail_names = B.DESCRIPTOR_NAMES + B.CC50_NAMES
+    elif n_tail == len(B.DESCRIPTOR_NAMES):
+        tail_names = B.DESCRIPTOR_NAMES
+    else:
+        return None
+    names = ["Morgan fingerprint (сумма)"] + tail_names
+    vals = np.concatenate([[imp[:B.FP_BITS].sum()], imp[B.FP_BITS:]])
+    order = np.argsort(vals)
+    fig, ax = plt.subplots(figsize=(5, 3.8))
+    ax.barh([names[i] for i in order], vals[order])
     ax.set_xlabel("Важность признака")
     fig.tight_layout()
     return fig
