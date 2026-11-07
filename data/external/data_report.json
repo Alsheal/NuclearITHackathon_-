@@ -1,0 +1,10 @@
+{
+  "rows_raw": 7101,
+  "invalid_smiles": 0,
+  "rows_without_both_ic50_cc50": 6780,
+  "duplicates_removed": 0,
+  "rows_final": 321,
+  "unique_molecules": 287,
+  "unique_dois": 72,
+  "overlap_with_test_molecules": 77
+}

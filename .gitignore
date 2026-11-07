@@ -1,11 +1,6 @@
+.venv/
+.idea/
 __pycache__/
 *.pyc
-.venv/
-venv/
-.env
-
+catboost_info/
 models/*.joblib
-
-data/*.csv
-
-results/*.csv

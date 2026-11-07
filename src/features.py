@@ -1,104 +1,37 @@
-
+"""Признаки только из SMILES: дескрипторы RDKit + MACCS keys + Morgan counts (r=2, 1024).
+CC50/IC50 как признаки НЕ используются (запрещено условием: SI считается из них математически)."""
 import numpy as np
+from rdkit import Chem, RDLogger
+from rdkit.Chem import Descriptors, MACCSkeys, rdFingerprintGenerator as G
+from rdkit.Chem.Scaffolds import MurckoScaffold
 
-from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
-
-
-FINGERPRINT_BITS = 2048
-MORGAN_RADIUS = 2
-
-
-def is_valid_smiles(smiles):
-    """Проверяет корректность SMILES."""
-
-    if not isinstance(smiles, str) or not smiles.strip():
-        return False
-
-    try:
-        return Chem.MolFromSmiles(smiles) is not None
-    except Exception:
-        return False
+RDLogger.DisableLog("rdApp.*")
+_desc = [f for _, f in Descriptors.descList]
+_morgan = G.GetMorganGenerator(radius=2, fpSize=1024)
+N_FEATURES = len(_desc) + 167 + 1024
 
 
-def smiles_to_features(smiles, cc50_values=None):
-    """Преобразует SMILES в числовые признаки."""
-
-    smiles = list(smiles)
-
-    if cc50_values is None:
-        cc50_values = [np.nan] * len(smiles)
-    else:
-        cc50_values = list(cc50_values)
-
-    if len(smiles) != len(cc50_values):
-        raise ValueError("Количество SMILES и CC50 не совпадает.")
-
-    result = []
-
-    for i, (smile, cc50) in enumerate(zip(smiles, cc50_values)):
-
-        if not is_valid_smiles(smile):
-            raise ValueError(
-                f"Некорректный SMILES в строке {i}: {smile}"
-            )
-
-        mol = Chem.MolFromSmiles(smile)
-
-        # Morgan fingerprints — описание структуры молекулы
-        fingerprint = AllChem.GetMorganFingerprintAsBitVect(
-            mol,
-            MORGAN_RADIUS,
-            nBits=FINGERPRINT_BITS
-        )
-
-        fingerprint_array = np.zeros(
-            FINGERPRINT_BITS,
-            dtype=np.float32
-        )
-
-        DataStructs.ConvertToNumpyArray(
-            fingerprint,
-            fingerprint_array
-        )
-
-        # Физико-химические характеристики
-        descriptors = [
-            Descriptors.MolWt(mol),
-            Descriptors.MolLogP(mol),
-            rdMolDescriptors.CalcTPSA(mol),
-            rdMolDescriptors.CalcNumHBD(mol),
-            rdMolDescriptors.CalcNumHBA(mol),
-            rdMolDescriptors.CalcNumRings(mol),
-            rdMolDescriptors.CalcNumRotatableBonds(mol),
-            rdMolDescriptors.CalcFractionCSP3(mol),
-            Descriptors.HeavyAtomCount(mol)
-        ]
-
-        # Обработка CC50
+def mol_features(smiles):
+    mol = Chem.MolFromSmiles(str(smiles))
+    if mol is None:
+        return np.full(N_FEATURES, np.nan)
+    d = []
+    for f in _desc:
         try:
-            cc50 = float(cc50)
-        except (TypeError, ValueError):
-            cc50 = np.nan
+            d.append(f(mol))
+        except Exception:
+            d.append(np.nan)
+    d = np.clip(np.nan_to_num(d, nan=np.nan, posinf=1e6, neginf=-1e6), -1e6, 1e6)
+    maccs = np.array(list(MACCSkeys.GenMACCSKeys(mol)), float)
+    return np.concatenate([d, maccs, _morgan.GetCountFingerprintAsNumPy(mol).astype(float)])
 
-        missing_cc50 = (
-            not np.isfinite(cc50) or cc50 <= 0
-        )
 
-        if missing_cc50:
-            log_cc50 = np.nan
-        else:
-            log_cc50 = np.log10(cc50)
+def scaffold(smiles):
+    try:
+        return MurckoScaffold.MurckoScaffoldSmiles(str(smiles)) or str(smiles)
+    except Exception:
+        return str(smiles)
 
-        features = np.concatenate([
-            fingerprint_array,
-            np.array(descriptors, dtype=np.float32),
-            np.array(
-                [log_cc50, float(missing_cc50)],
-                dtype=np.float32
-            )
-        ])
 
-        result.append(features)
-
-    return np.array(result, dtype=np.float32)
+def build(smiles_series):
+    return np.vstack([mol_features(s) for s in smiles_series])
