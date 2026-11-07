@@ -11,7 +11,7 @@ from src.features import build, scaffold
 from src.model import make_model
 
 ROOT = Path(__file__).resolve().parents[1]
-SI_CLIP = 5000.0
+SI_CLIP = 5000          # было 1e5 — слишком мягко
 DROP_TEST_OVERLAP = True
 
 
@@ -61,6 +61,7 @@ def load_training_data(use_external=True):
         e = e[~e.SMILES.map(canon).isin(known)]
         e["IC50_uM_VACV"] = e["IC50_uM"]
         e["SI VACV"] = (e["CC50_uM"] / e["IC50_uM"]).clip(upper=SI_CLIP)
+        e = e[(e["SI VACV"] >= 0.05) & (e["SI VACV"] <= 3000)]   # жёсткий фильтр выбросов
         e["is_competition"] = False
         parts.append(e[["SMILES", "CC50_uM", "IC50_uM_VACV", "SI VACV", "is_competition"]])
         print(f"External: {f.name}: {n0} -> {len(e)} rows used")
@@ -70,12 +71,12 @@ def load_training_data(use_external=True):
 def main():
     tr = load_training_data(use_external="--no-external" not in sys.argv)
     comp = tr["is_competition"].to_numpy()
-    X = build(tr["SMILES"])
-    y = np.log10(1.0 + tr["SI VACV"].to_numpy(float))
-    groups = tr["SMILES"].map(scaffold).to_numpy()
+    X = build(tr.SMILES)
+    y = np.log10(1 + tr["SI VACV"].to_numpy(float))
+    groups = tr.SMILES.map(scaffold).to_numpy()
 
-    # Веса: конкурсные строки важнее
-    weights = np.where(comp, 2.5, 1.0)
+    # Веса: данные соревнования важнее внешних
+    weights = np.where(comp, 3.5, 1.0).astype(float)
 
     oof = np.zeros(len(y))
     for a, b in GroupKFold(5).split(X, y, groups):
@@ -83,27 +84,26 @@ def main():
         m.fit(X[a], y[a], sample_weight=weights[a])
         oof[b] = m.predict(X[b])
 
-    si_true = tr["SI VACV"].to_numpy(float)[comp]
-    pred = np.clip(10 ** oof[comp] - 1.0, 0, None)
+    si = tr["SI VACV"].to_numpy(float)[comp]
+    pred = np.clip(10 ** oof - 1, 0, None)[comp]
     oof_c, y_c = oof[comp], y[comp]
 
     metrics = {
-        "mode": "SMILES only (descriptors+MACCS+Morgan2048)",
+        "mode": "SMILES only + weighted external",
         "train_rows_total": int(len(tr)),
         "eval_rows_competition": int(comp.sum()),
         "RMSE_log10(1+SI)": float(np.sqrt(np.mean((oof_c - y_c) ** 2))),
         "MAE_log10(1+SI)": float(np.mean(np.abs(oof_c - y_c))),
-        "MAE_SI": float(np.mean(np.abs(pred - si_true))),
+        "MAE_SI": float(np.mean(np.abs(pred - si))),
         "Spearman": float(pd.Series(oof_c).corr(pd.Series(y_c), method="spearman")),
     }
     print("Scaffold-CV:", metrics)
-    (ROOT / "results").mkdir(exist_ok=True)
     pd.Series(metrics).to_json(ROOT / "results/cv_metrics.json", indent=2)
 
+    # Финальная модель тоже с весами
     model = make_model()
     model.fit(X, y, sample_weight=weights)
-    joblib.dump({"model": model, "si_pred_clip": 5000.0, "si_scale": 1.0},
-                ROOT / "models/si_model.joblib")
+    joblib.dump(model, ROOT / "models/si_model.joblib")
     print("Saved models/si_model.joblib")
 
 
