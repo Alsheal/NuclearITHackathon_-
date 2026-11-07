@@ -1,164 +1,188 @@
-import pandas as pd
-import numpy as np
-import joblib
 
+import json
 from pathlib import Path
 
-from sklearn.model_selection import KFold
-from sklearn.metrics import mean_squared_error
+import numpy as np
+import pandas as pd
 
-from src.features import smiles_to_features
-from src.models import get_models
-
-
-# Пути
-DATA_PATH = "data/train.csv"
-MODEL_PATH = "models/best_model.pkl"
-RESULT_PATH = "results/model_comparison.csv"
-
-Path("models").mkdir(exist_ok=True)
-Path("results").mkdir(exist_ok=True)
-
-
-# 1. Загружаем датасет
-df = pd.read_csv(DATA_PATH)
-
-print("Размер датасета:", df.shape)
-print("Колонки:", df.columns.tolist())
-
-
-# 2. Названия колонок
-SMILES_COLUMN = "SMILES"
-TARGET_COLUMN = "SI VACV"
-
-
-# 3. Проверяем данные
-if SMILES_COLUMN not in df.columns:
-    raise ValueError("Не найдена колонка SMILES")
-
-if TARGET_COLUMN not in df.columns:
-    raise ValueError("Не найдена колонка SI VACV")
-
-
-# 4. Убираем отсутствующие значения
-df[TARGET_COLUMN] = pd.to_numeric(
-    df[TARGET_COLUMN],
-    errors="coerce"
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score
 )
 
-df = df.dropna(
-    subset=[SMILES_COLUMN, TARGET_COLUMN]
-).copy()
-
-if len(df) < 10:
-    raise ValueError("Недостаточно данных для обучения")
+from src.features import smiles_to_features, is_valid_smiles
+from src.models import build_model
 
 
-# 5. Убираем дубликаты SMILES
-df[SMILES_COLUMN] = df[SMILES_COLUMN].astype(str)
+# Пути проекта
+ROOT = Path(__file__).resolve().parent
 
-# 6. Создаём признаки только из SMILES
-X = smiles_to_features(
-    df[SMILES_COLUMN].tolist()
-)
+DATA_DIR = ROOT / "data"
+MODEL_DIR = ROOT / "models"
+RESULTS_DIR = ROOT / "results"
 
-y = df[TARGET_COLUMN].to_numpy(
-    dtype=np.float64
-)
-
-print("Размер матрицы признаков:", X.shape)
+TRAIN_PATH = DATA_DIR / "train.csv"
+MODEL_PATH = MODEL_DIR / "si_model.joblib"
+REPORT_PATH = RESULTS_DIR / "training_report.json"
 
 
-# 7. Получаем модели
-models = get_models()
+def main():
 
+    print("=" * 55)
+    print("ОБУЧЕНИЕ МОДЕЛИ RANDOM FOREST")
+    print("=" * 55)
 
-# 8. Кросс-валидация
-cv = KFold(
-    n_splits=5,
-    shuffle=True,
-    random_state=42
-)
+    MODEL_DIR.mkdir(exist_ok=True)
+    RESULTS_DIR.mkdir(exist_ok=True)
 
-results = {}
-
-for name, model in models.items():
-
-    fold_mse = []
-
-    for train_idx, val_idx in cv.split(X):
-
-        X_train = X[train_idx]
-        X_val = X[val_idx]
-
-        y_train = y[train_idx]
-        y_val = y[val_idx]
-
-        model.fit(X_train, y_train)
-
-        predictions = model.predict(X_val)
-
-        mse = mean_squared_error(
-            y_val,
-            predictions
+    # 1. Загружаем обучающую таблицу
+    if not TRAIN_PATH.exists():
+        raise FileNotFoundError(
+            f"Не найден файл: {TRAIN_PATH}"
         )
 
-        fold_mse.append(mse)
+    data = pd.read_csv(TRAIN_PATH)
 
-    results[name] = {
-        "MSE_mean": np.mean(fold_mse),
-        "MSE_std": np.std(fold_mse)
-    }
+    required_columns = [
+        "SMILES",
+        "SI VACV",
+        "CC50_uM"
+    ]
 
-    print(
-        f"{name}: "
-        f"MSE = {np.mean(fold_mse):.5f}"
+    for column in required_columns:
+        if column not in data.columns:
+            raise ValueError(
+                f"В train.csv отсутствует столбец: {column}"
+            )
+
+    print(f"Всего строк в обучающей таблице: {len(data)}")
+
+    # 2. Оставляем строки с корректными SMILES
+    data = data[
+        data["SMILES"].apply(is_valid_smiles)
+    ].copy()
+
+    # 3. Убираем строки без положительного значения SI
+    data["SI VACV"] = pd.to_numeric(
+        data["SI VACV"],
+        errors="coerce"
     )
 
+    data = data[
+        data["SI VACV"].notna()
+        & (data["SI VACV"] > 0)
+    ].copy()
 
-# 9. Сохраняем результаты сравнения
-results_df = pd.DataFrame(results).T
+    if len(data) < 10:
+        raise ValueError(
+            "Недостаточно корректных обучающих примеров."
+        )
 
-results_df.to_csv(
-    RESULT_PATH,
-    index=True,
-    index_label="model"
-)
+    print(f"Примеров после очистки: {len(data)}")
+
+    # 4. Подготавливаем признаки
+    X = smiles_to_features(
+        data["SMILES"],
+        data["CC50_uM"]
+    )
+
+    # Модель предсказывает log10(SI)
+    y = np.log10(data["SI VACV"].to_numpy())
+
+    print(f"Количество признаков: {X.shape[1]}")
+
+    # 5. Делим данные на обучение и проверку
+    X_train, X_valid, y_train, y_valid = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42
+    )
+
+    print(f"Обучающих примеров: {len(X_train)}")
+    print(f"Проверочных примеров: {len(X_valid)}")
+
+    # 6. Создаём и обучаем Random Forest
+    print("\nНачинаем обучение Random Forest...")
+
+    model = build_model()
+
+    model.fit(X_train, y_train)
+
+    print("Обучение завершено!")
+
+    # 7. Проверяем качество модели
+    predictions = model.predict(X_valid)
+
+    mae = mean_absolute_error(
+        y_valid,
+        predictions
+    )
+
+    rmse = np.sqrt(
+        mean_squared_error(y_valid, predictions)
+    )
+
+    r2 = r2_score(
+        y_valid,
+        predictions
+    )
+
+    print("\nРЕЗУЛЬТАТЫ ПРОВЕРКИ")
+    print("-" * 40)
+    print(f"MAE (log10 SI): {mae:.4f}")
+    print(f"RMSE (log10 SI): {rmse:.4f}")
+    print(f"R2: {r2:.4f}")
+
+    # 8. Переобучаем модель на всех доступных данных
+    print("\nОбучаем итоговую модель на всех данных...")
+
+    final_model = build_model()
+    final_model.fit(X, y)
+
+    # 9. Сохраняем обученную модель
+    import joblib
+
+    joblib.dump(final_model, MODEL_PATH)
+
+    # 10. Сохраняем отчёт
+    report = {
+        "model": "RandomForestRegressor",
+        "training_samples": int(len(X)),
+        "features": int(X.shape[1]),
+        "target": "log10(SI VACV)",
+        "validation_MAE_log10": float(mae),
+        "validation_RMSE_log10": float(rmse),
+        "validation_R2": float(r2),
+        "parameters": {
+            "n_estimators": 500,
+            "max_features": 0.7,
+            "min_samples_split": 4,
+            "min_samples_leaf": 2,
+            "random_state": 42
+        }
+    }
+
+    with open(
+        REPORT_PATH,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            report,
+            file,
+            ensure_ascii=False,
+            indent=4
+        )
+
+    print("\n" + "=" * 55)
+    print("ГОТОВО!")
+    print(f"Модель сохранена: {MODEL_PATH}")
+    print(f"Отчёт сохранён: {REPORT_PATH}")
+    print("=" * 55)
 
 
-# 10. Выбираем лучшую модель
-best_model_name = min(
-    results,
-    key=lambda name: results[name]["MSE_mean"]
-)
-
-print("\nЛучшая модель:", best_model_name)
-
-
-# 11. Повторно обучаем её на всех данных
-best_model = models[best_model_name]
-
-best_model.fit(X, y)
-
-
-# 12. Сохраняем обученную модель
-package = {
-    "model": best_model,
-    "model_name": best_model_name,
-    "target": TARGET_COLUMN,
-    "features": "Morgan Fingerprint + molecular descriptors",
-    "fp_size": 2048,
-    "fp_radius": 2,
-    "random_state": 42
-}
-
-joblib.dump(
-    package,
-    MODEL_PATH
-)
-
-
-print("\nОбучение завершено!")
-print("Лучшая модель:", best_model_name)
-print("Модель сохранена:", MODEL_PATH)
-print("Результаты:", RESULT_PATH)
+if __name__ == "__main__":
+    main()
